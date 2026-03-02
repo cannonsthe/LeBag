@@ -1,0 +1,13 @@
+{
+  "name": "lebag",
+  "version": "1.0.0",
+  "description": "LeBag Smart Baggage Tracker - Telegram Bot",
+  "main": "tele.js",
+  "scripts": {
+    "start": "node tele.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}

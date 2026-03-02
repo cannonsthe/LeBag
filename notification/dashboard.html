@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LeBag — Operator Dashboard</title>
+    <link rel="icon"
+        href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'><text y='32' font-size='32'>🛄</text></svg>" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet" />
+    <style>
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        :root {
+            --bg: #050505;
+            --glass-bg: rgba(20, 20, 25, 0.5);
+            --glass-border: rgba(255, 255, 255, 0.08);
+            --text: #FFFFFF;
+            --muted: #8892B0;
+            --cyan: #00F0FF;
+            --cyan-glow: rgba(0, 240, 255, 0.3);
+            --gold: #FFC000;
+            --green: #00FF8C;
+            --panel-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg);
+            background-image:
+                radial-gradient(circle at 10% 20%, rgba(0, 240, 255, 0.04), transparent 30%),
+                radial-gradient(circle at 90% 80%, rgba(255, 192, 0, 0.04), transparent 30%);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 48px 24px;
+        }
+
+        /* ---- HEADER ---- */
+        header {
+            text-align: center;
+            margin-bottom: 48px;
+        }
+
+        header h1 {
+            font-size: 3rem;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+            background: linear-gradient(135deg, #fff 0%, #a0aabf 100%);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+            filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.5));
+            margin-bottom: 8px;
+        }
+
+        header p {
+            color: var(--muted);
+            font-size: 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        /* ---- LIVE DOT ---- */
+        .live-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--green);
+            animation: pulse-dot 1.6s ease-in-out infinite;
+            display: inline-block;
+        }
+
+        @keyframes pulse-dot {
+
+            0%,
+            100% {
+                opacity: 1;
+                transform: scale(1);
+            }
+
+            50% {
+                opacity: 0.4;
+                transform: scale(0.7);
+            }
+        }
+
+        /* ---- STATS ROW ---- */
+        .stats-row {
+            display: flex;
+            gap: 16px;
+            justify-content: center;
+            margin-bottom: 40px;
+            flex-wrap: wrap;
+        }
+
+        .stat-card {
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            backdrop-filter: blur(16px);
+            border-radius: 16px;
+            padding: 20px 32px;
+            text-align: center;
+            min-width: 140px;
+        }
+
+        .stat-card .stat-value {
+            font-size: 2rem;
+            font-weight: 800;
+            color: var(--cyan);
+            line-height: 1;
+        }
+
+        .stat-card .stat-label {
+            font-size: 0.75rem;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-top: 6px;
+        }
+
+        /* ---- BAG LIST ---- */
+        #bag-list {
+            max-width: 800px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .bag-card {
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            backdrop-filter: blur(16px);
+            border-radius: 16px;
+            padding: 20px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            animation: slideIn 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+            transition: background 0.2s;
+        }
+
+        .bag-card:hover {
+            background: rgba(255, 255, 255, 0.06);
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-16px) scale(0.97);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+
+        .bag-icon {
+            font-size: 1.8rem;
+            flex-shrink: 0;
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.06);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .bag-info {
+            flex: 1;
+        }
+
+        .bag-owner {
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: var(--text);
+        }
+
+        .bag-sub {
+            font-size: 0.85rem;
+            color: var(--muted);
+            margin-top: 3px;
+        }
+
+        .bag-meta {
+            text-align: right;
+            flex-shrink: 0;
+        }
+
+        .flight-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid var(--glass-border);
+            border-radius: 100px;
+            padding: 4px 14px;
+            font-size: 0.8rem;
+            font-weight: 700;
+            font-family: monospace;
+            letter-spacing: 0.08em;
+            color: #a0c4ff;
+        }
+
+        .bag-time {
+            font-size: 0.75rem;
+            color: var(--muted);
+            margin-top: 6px;
+            font-family: monospace;
+        }
+
+        /* ---- EMPTY STATE ---- */
+        #empty-state {
+            text-align: center;
+            color: var(--muted);
+            padding: 80px 20px;
+            display: none;
+        }
+
+        #empty-state .empty-icon {
+            font-size: 3rem;
+            margin-bottom: 12px;
+        }
+
+        #empty-state p {
+            font-size: 1rem;
+        }
+
+        /* ---- FOOTER ---- */
+        footer {
+            text-align: center;
+            margin-top: 60px;
+            color: rgba(255, 255, 255, 0.15);
+            font-size: 0.75rem;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+        }
+
+        @media (max-width: 600px) {
+            header h1 {
+                font-size: 2rem;
+            }
+
+            .bag-card {
+                flex-wrap: wrap;
+            }
+
+            .bag-meta {
+                text-align: left;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <header>
+        <h1>LeBag 🛄</h1>
+        <p><span class="live-dot"></span> Operator Dashboard — Live Belt View</p>
+    </header>
+
+    <div class="stats-row">
+        <div class="stat-card">
+            <div class="stat-value" id="stat-total">0</div>
+            <div class="stat-label">Bags Scanned</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="stat-recent" style="color:var(--gold)">—</div>
+            <div class="stat-label">Last Scan</div>
+        </div>
+    </div>
+
+    <div id="bag-list"></div>
+
+    <div id="empty-state">
+        <div class="empty-icon">📭</div>
+        <p>No bags on the belt yet.<br>Scan a QR code to get started.</p>
+    </div>
+
+    <footer>LeBag System — Real-time Luggage Tracking</footer>
+
+    <script>
+        const LEBAG_API = 'http://localhost:5001/api/bags';
+        const bagList = document.getElementById('bag-list');
+        const emptyState = document.getElementById('empty-state');
+        const statTotal = document.getElementById('stat-total');
+        const statRecent = document.getElementById('stat-recent');
+
+        let knownIds = new Set();
+
+        function formatTime(iso) {
+            if (!iso) return '—';
+            const d = new Date(iso);
+            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        }
+
+        function createCard(bag) {
+            const card = document.createElement('div');
+            card.className = 'bag-card';
+            card.id = `bag-${bag.id}`;
+            card.innerHTML = `
+        <div class="bag-icon">🧳</div>
+        <div class="bag-info">
+          <div class="bag-owner">${bag.owner || 'Unknown'}</div>
+          <div class="bag-sub">${bag.type || '—'}</div>
+        </div>
+        <div class="bag-meta">
+          <div class="flight-badge">✈ ${bag.flight || '—'}</div>
+          <div class="bag-time">${formatTime(bag.timestamp)}</div>
+        </div>
+      `;
+            return card;
+        }
+
+        async function fetchBags() {
+            try {
+                const res = await fetch(LEBAG_API + '?_=' + Date.now());
+                const bags = await res.json();
+
+                // Stats
+                statTotal.textContent = bags.length;
+                if (bags.length > 0) {
+                    statRecent.textContent = formatTime(bags[0].timestamp);
+                }
+
+                // Empty state
+                emptyState.style.display = bags.length === 0 ? 'block' : 'none';
+
+                // Add new cards (prepend for newest-first)
+                bags.forEach(bag => {
+                    if (!knownIds.has(bag.id)) {
+                        knownIds.add(bag.id);
+                        bagList.prepend(createCard(bag));
+                    }
+                });
+
+                // Remove cards that no longer exist
+                knownIds.forEach(id => {
+                    if (!bags.find(b => b.id === id)) {
+                        const el = document.getElementById(`bag-${id}`);
+                        if (el) el.remove();
+                        knownIds.delete(id);
+                    }
+                });
+
+            } catch (e) {
+                console.warn('Could not reach LeBag API:', e.message);
+            }
+        }
+
+        fetchBags();
+        setInterval(fetchBags, 1000);
+    </script>
+</body>
+
+</html>
