@@ -1,5 +1,8 @@
+import os
 import time
-import requests
+import json
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import board
 import busio
 import RPi.GPIO as GPIO
@@ -7,23 +10,68 @@ from digitalio import DigitalInOut
 from adafruit_pn532.spi import PN532_SPI
 
 # ==========================================
-# CONFIGURATION
+# CONFIGURATION (all set by start_pi.sh)
 # ==========================================
-AIN1, AIN2     = 13, 19
-CONVEYOR_SPEED = 50
-SERVER_URL     = "http://192.168.137.1:5001/api/nfc_scan"  # ← PC's IP on hotspot
+AIN1, AIN2       = 13, 19
+CONVEYOR_SPEED   = int(os.environ.get('LEBAG_SPEED', '50'))
+CONVEYOR_ENABLED = os.environ.get('LEBAG_CONVEYOR', '1') != '0'
+RUNTIME_SECONDS  = int(os.environ.get('LEBAG_RUNTIME', '0'))   # 0 = run forever
+NFC_SERVER_PORT  = int(os.environ.get('LEBAG_NFC_PORT', '5002'))
 
-# Mifare Classic authentication keys
-# NFC Tools (and most Android NFC apps) write NDEF to Mifare Classic using
-# the NFC Forum spec keys — NOT the default 0xFF key:
-#   Sector 0  (MAD)  → Key A: A0 A1 A2 A3 A4 A5
-#   Sectors 1-15     → Key A: D3 F7 D3 F7 D3 F7
-# We also try the plain default as a last resort for raw-written cards.
-MIFARE_CMD_AUTH_A  = 0x60
-MIFARE_CMD_AUTH_B  = 0x61
-KEY_DEFAULT        = b'\xFF\xFF\xFF\xFF\xFF\xFF'  # Factory default
-KEY_MAD            = b'\xA0\xA1\xA2\xA3\xA4\xA5'  # Sector 0 (MAD) NDEF key
-KEY_NDEF_DATA      = b'\xD3\xF7\xD3\xF7\xD3\xF7'  # Sectors 1-15 NDEF key
+# ==========================================
+# SCAN QUEUE — thread-safe for HTTP server
+# ==========================================
+scan_queue = []
+scan_lock  = threading.Lock()
+
+def push_scan(bag_id, uid_str, card_type):
+    """Add a confirmed scan to the queue for the PC to pick up."""
+    with scan_lock:
+        scan_queue.append({
+            "bag_id":    bag_id,
+            "uid":       uid_str,
+            "card_type": card_type,
+            "time":      time.time()
+        })
+
+# ==========================================
+# LIGHTWEIGHT HTTP SERVER
+# PC polls GET /api/nfc_scan to drain the queue.
+# Pi doesn't need to know the PC's IP at all.
+# ==========================================
+class NfcHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/api/nfc_scan':
+            with scan_lock:
+                payload = list(scan_queue)
+                scan_queue.clear()
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, fmt, *args):
+        pass  # Suppress default access logs to keep terminal clean
+
+def start_http_server():
+    server = HTTPServer(('0.0.0.0', NFC_SERVER_PORT), NfcHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+# ==========================================
+# MIFARE CLASSIC AUTH KEYS (NFC Forum NDEF)
+# ==========================================
+MIFARE_CMD_AUTH_A = 0x60
+MIFARE_CMD_AUTH_B = 0x61
+KEY_DEFAULT       = b'\xFF\xFF\xFF\xFF\xFF\xFF'
+KEY_MAD           = b'\xA0\xA1\xA2\xA3\xA4\xA5'  # Sector 0 MAD key
+KEY_NDEF_DATA     = b'\xD3\xF7\xD3\xF7\xD3\xF7'  # Sectors 1–15 NDEF key
 
 # ==========================================
 # PN532 SPI SETUP
@@ -33,12 +81,9 @@ cs_pin = DigitalInOut(board.D8)
 pn532  = PN532_SPI(spi, cs_pin, debug=False)
 
 # ==========================================
-# NTAG213 TEXT READER
-# Reads NDEF text from pages 4–23 (80 bytes)
+# NDEF TEXT PARSER (shared for NTAG + Mifare)
 # ==========================================
 def parse_ndef_text(buffer):
-    """Shared NDEF Text Record parser — works for NTAG213 and Mifare Classic alike.
-    Looks for 0x03 (NDEF TLV) then a 'T' Text Record and extracts the payload."""
     try:
         if 0x03 in buffer and b'T' in buffer:
             t_idx      = buffer.find(b'T')
@@ -49,14 +94,15 @@ def parse_ndef_text(buffer):
                 text = buffer[text_start:text_end].decode('utf-8', errors='ignore').strip('\x00').strip()
                 if text:
                     return text
-        # Fallback: raw UTF-8 if there's no NDEF wrapper (plain-text write)
         text = bytes(buffer).decode('utf-8', errors='ignore').strip('\x00').strip()
         return text if is_valid_string(text) else None
     except Exception:
         return None
 
+# ==========================================
+# NTAG213 READER
+# ==========================================
 def get_ntag_text():
-    """Reads NDEF text payload from NTAG213 pages 4–23."""
     try:
         full_buffer = bytearray()
         for page in range(4, 24):
@@ -68,22 +114,19 @@ def get_ntag_text():
         pass
     return None
 
+# ==========================================
+# MIFARE CLASSIC 1K READER
+# ==========================================
 def get_mifare_text(uid):
-    """Reads NDEF text from a Mifare Classic 1K card written with NFC Tools.
-    Uses NFC Forum NDEF sector keys (not the default FF key)."""
     READ_PLAN = [
-        (0, [1, 2],      KEY_MAD),        # Sector 0 — MAD key
-        (1, [4, 5, 6],   KEY_NDEF_DATA),  # Sector 1 — NDEF data key (most likely location)
-        (2, [8, 9, 10],  KEY_NDEF_DATA),  # Sector 2 — NDEF data key
+        (0, [1, 2],     KEY_MAD),
+        (1, [4, 5, 6],  KEY_NDEF_DATA),
+        (2, [8, 9, 10], KEY_NDEF_DATA),
     ]
-
     full_buffer = bytearray()
-
     try:
         for sector, blocks, key_a in READ_PLAN:
-            auth_block = sector * 4 + 3  # Sector trailer block number
-
-            # Try the assigned NDEF key first, fall back to default
+            auth_block = sector * 4 + 3
             authenticated = False
             for key in (key_a, KEY_DEFAULT):
                 authenticated = pn532.mifare_classic_authenticate_block(
@@ -91,77 +134,48 @@ def get_mifare_text(uid):
                 )
                 if authenticated:
                     break
-
             if not authenticated:
-                print(f"   [Mifare] ⚠️  Auth failed for sector {sector} with all keys")
+                print(f"   [Mifare] ⚠️  Auth failed for sector {sector}")
                 continue
-
             for block_num in blocks:
                 data = pn532.mifare_classic_read_block(block_num)
                 if data:
                     full_buffer.extend(data)
                     printable = bytes(data).decode('utf-8', errors='replace').strip('\x00').strip()
                     print(f"   [Mifare] Block {block_num:02d}: {printable!r}")
-
         if full_buffer:
             return parse_ndef_text(full_buffer)
-
     except Exception as e:
         print(f"   [Mifare] Read error: {e}")
-
     return None
 
+# ==========================================
+# CARD TYPE AUTO-DETECT
+# ==========================================
+def read_bag_id(uid):
+    uid_len = len(uid)
+    if uid_len == 7:
+        return get_ntag_text(), "NTAG213"
+    elif uid_len == 4:
+        return get_mifare_text(uid), "Mifare Classic"
+    else:
+        return get_ntag_text() or get_mifare_text(uid), "Unknown"
 
 # ==========================================
 # VALIDATION
 # ==========================================
 def is_valid_string(s):
-    """Sanity check: printable, length ≥ 4, >80% ASCII printable chars."""
     if not s or len(s) < 4:
         return False
     printable = sum(1 for c in s if c.isprintable())
     return (printable / len(s)) > 0.8
 
 # ==========================================
-# AUTO-DETECT CARD TYPE AND READ
-# NTAG213  → 7-byte UID
-# Mifare Classic 1K → 4-byte UID
-# ==========================================
-def read_bag_id(uid):
-    """Auto-detects card type from UID length and reads the bag ID."""
-    uid_len = len(uid)
-
-    if uid_len == 7:
-        # Almost certainly NTAG21x family
-        text = get_ntag_text()
-        card_type = "NTAG213"
-    elif uid_len == 4:
-        # Almost certainly Mifare Classic 1K
-        text = get_mifare_text(uid)
-        card_type = "Mifare Classic"
-    else:
-        # Unknown — try both
-        text = get_ntag_text() or get_mifare_text(uid)
-        card_type = "Unknown"
-
-    return text, card_type
-
-# ==========================================
-# SEND TO CENTRAL HUB
-# ==========================================
-def post_to_server(bag_id, uid_str):
-    try:
-        resp = requests.post(SERVER_URL, json={"bag_id": bag_id, "uid": uid_str}, timeout=2)
-        print(f"  └─ 📡 Server HTTP {resp.status_code} — {resp.json().get('message', '')}")
-    except Exception as e:
-        print(f"  └─ ⚠️  Could not reach server: {e}")
-
-# ==========================================
 # MAIN
 # ==========================================
 last_uid       = None
 last_scan_time = 0
-seen_bag_ids   = {}   # local 10s cooldown
+seen_bag_ids   = {}
 
 try:
     GPIO.setmode(GPIO.BCM)
@@ -173,24 +187,34 @@ try:
     pwm2.start(0)
     pn532.SAM_configuration()
 
-    pwm1.ChangeDutyCycle(CONVEYOR_SPEED)
+    if CONVEYOR_ENABLED:
+        pwm1.ChangeDutyCycle(CONVEYOR_SPEED)
 
-    print("=" * 50)
+    http_server = start_http_server()
+
+    print("=" * 54)
     print("  LeBag NFC Reader — Online")
-    print("=" * 50)
-    print(f"  Motor      : AIN1={AIN1}, AIN2={AIN2} | Speed={CONVEYOR_SPEED}%")
-    print(f"  NFC        : PN532 via SPI (CS=D8)")
-    print(f"  Card types : NTAG213 (7-byte UID) + Mifare Classic 1K (4-byte UID)")
-    print(f"  Server     : {SERVER_URL}")
-    print("-" * 50)
-    print("  Belt spinning. Waiting for NFC tags...\n")
+    print("=" * 54)
+    print(f"  Motor      : {'ON @ ' + str(CONVEYOR_SPEED) + '%' if CONVEYOR_ENABLED else 'OFF'}")
+    print(f"  NFC server : http://0.0.0.0:{NFC_SERVER_PORT}/api/nfc_scan")
+    print(f"  Card types : NTAG213 + Mifare Classic 1K")
+    print(f"  Runtime    : {'∞ (until Ctrl+C)' if RUNTIME_SECONDS == 0 else str(RUNTIME_SECONDS) + 's'}")
+    print("-" * 54)
+    print("  PC polls this Pi for NFC scans (no PC IP needed here)")
+    print("  Waiting for NFC tags...\n")
+
+    start_time = time.time()
 
     while True:
+        # Check runtime limit
+        if RUNTIME_SECONDS > 0 and (time.time() - start_time) >= RUNTIME_SECONDS:
+            print(f"\n⏱️  Runtime of {RUNTIME_SECONDS}s reached. Stopping.")
+            break
+
         uid = pn532.read_passive_target(timeout=0.1)
 
         if uid is not None:
             now = time.time()
-
             if uid != last_uid or (now - last_scan_time) > 4:
                 uid_str = '-'.join(hex(b) for b in uid)
                 bag_text, card_type = read_bag_id(uid)
@@ -202,19 +226,20 @@ try:
 
                     if bag_text not in seen_bag_ids or (now - seen_bag_ids[bag_text]) > 10:
                         seen_bag_ids[bag_text] = now
-                        post_to_server(bag_text, uid_str)
+                        push_scan(bag_text, uid_str, card_type)
+                        print(f"   → Queued for PC to collect")
                     else:
-                        print(f"   (local cooldown — not re-sending)")
+                        print(f"   (local cooldown — not re-queuing)")
 
                 elif bag_text:
-                    print(f"\n⚠️  Garbage NFC read dropped [{card_type}]: '{bag_text}'")
+                    print(f"\n⚠️  Garbage read dropped [{card_type}]: '{bag_text}'")
                 else:
-                    print(f"\n⚠️  [{card_type}] tag detected (UID: {uid_str}) — no readable text found")
+                    print(f"\n⚠️  [{card_type}] tag detected — no readable text (UID: {uid_str})")
 
                 last_uid       = uid
                 last_scan_time = now
 
-        # Expire old local cooldowns
+        # Expire local cooldowns
         now = time.time()
         seen_bag_ids = {k: v for k, v in seen_bag_ids.items() if now - v < 10}
 
