@@ -16,7 +16,7 @@ SERVER_API_URL = "http://localhost:5001"
 # STREAM 2 — Phone camera (on-belt live tracking)
 # Use the IP Webcam app (Android) or similar. Format: http://<PHONE_IP>:8080/video
 # To find your phone's IP: open IP Webcam app → it shows the URL at the bottom
-ANDROID_STREAM_URL = "http://10.85.165.239:8080/video"  # ← Set to your phone's IP
+ANDROID_STREAM_URL = "http://10.47.163.60:8080/video"  # ← Set to your phone's IP
 
 # --------------------------
 # State Management
@@ -104,26 +104,53 @@ def send_to_backend(track_id, label):
         print(f"Error sending data to backend: {e}")
 
 def main():
-    print(f"Connecting to Android Phone stream at {ANDROID_STREAM_URL}...")
-    
+    print("=" * 55)
+    print("  LeBag YOLO Tracker — Starting")
+    print("=" * 55)
+    print(f"  Phone stream : {ANDROID_STREAM_URL}")
+    print(f"  Server API   : {SERVER_API_URL}")
+    print("-" * 55)
+
+    print(f"\n📱 Connecting to phone stream at {ANDROID_STREAM_URL}...")
     vs = VideoStream(ANDROID_STREAM_URL).start()
     time.sleep(2.0)
-    
+
+    grabbed, test_frame = vs.grabbed, vs.frame
+    if not grabbed or test_frame is None:
+        print("⚠️  Phone stream not reachable! Check IP Webcam app is running and IP is correct.")
+        print("   Falling back to local webcam (index 0)...")
+    else:
+        print("✅ Phone stream connected!\n")
+
     import torch
-    
-    print("Loading YOLOv8-nano pretrained model...")
+
+    # --- Model Loading ---
+    MODEL_FILE = "best.pt"
+    if not os.path.exists(MODEL_FILE):
+        print(f"⚠️  '{MODEL_FILE}' not found. Falling back to pretrained 'yolov8n.pt'.")
+        print(f"   (For best results, place your custom trained best.pt in the project folder)")
+        MODEL_FILE = "yolov8n.pt"
+    print(f"\n🤖 Loading model: {MODEL_FILE}...")
+
     _original_load = torch.load
     def _patched_load(*args, **kwargs):
         kwargs['weights_only'] = False
         return _original_load(*args, **kwargs)
     torch.load = _patched_load
-    
-    model = YOLO("best.pt")
-    if torch.backends.mps.is_available():
-        model.to('mps')
-        print("Using MPS acceleration for tracking.")
 
-    print("Starting tracking loop. Press 'q' to quit.")
+    model = YOLO(MODEL_FILE)
+
+    if torch.cuda.is_available():
+        model.to('cuda')
+        print("✅ Using CUDA GPU for tracking.")
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        model.to('mps')
+        print("✅ Using Apple MPS for tracking.")
+    else:
+        print("ℹ️  Using CPU for tracking (no GPU detected).")
+
+    print("\n▶️  Tracking loop started. Press 'q' to quit.\n")
+
     
     frame_count = 0
     

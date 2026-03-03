@@ -21,6 +21,7 @@ NAME_TO_CHAT_ID = {
     "YiBin":   "5554044576",
 }
 
+
 # --- FLASK APP SETUP ---
 app = Flask(__name__)
 CORS(app)
@@ -177,9 +178,11 @@ def nfc_scan():
         
     with lock:
         if bag_id in recent_scans and time.time() - recent_scans[bag_id] < 10:
+            print(f"  └─ 🔁 [NFC] Duplicate ignored (within 10s cooldown): '{bag_id}'")
             return jsonify({"message": "Duplicate ignored"}), 200
             
         current_scan_candidates.append({"bag_id": bag_id, "source": "nfc", "raw_data": data})
+        print(f"  └─ ⏳ [NFC] Queued. Waiting 1.0s for other sensors...") 
         
         if not robustness_timer_active:
             robustness_timer_active = True
@@ -200,9 +203,11 @@ def camera_scan():
         
     with lock:
         if bag_id in recent_scans and time.time() - recent_scans[bag_id] < 10:
+            print(f"  └─ 🔁 [CAM] Duplicate ignored (within 10s cooldown): '{bag_id}'")
             return jsonify({"message": "Duplicate ignored"}), 200
             
         current_scan_candidates.append({"bag_id": bag_id, "source": "camera", "raw_data": data})
+        print(f"  └─ ⏳ [CAM] Queued. Waiting 1.0s for other sensors...")
         
         if not robustness_timer_active:
             robustness_timer_active = True
@@ -316,7 +321,19 @@ def add_bag(owner, bag_type, flight):
 # ==========================================
 
 def run_server():
-    print(f"🚀 LeBag Server Backend (Robustness Enabled) Running on http://0.0.0.0:{SERVER_PORT}")
+    print("=" * 55)
+    print("  LeBag Central Hub — Starting")
+    print("=" * 55)
+    print(f"  Port              : {SERVER_PORT}")
+    print(f"  Notification URL  : {NOTIFICATION_SERVER_URL}")
+    print(f"  Bag DB            : {BAG_DB_FILE}")
+    print("-" * 55)
+    print(f"  API endpoints:")
+    print(f"    POST /api/nfc_scan    — NFC scan from Pi")
+    print(f"    POST /api/camera_scan — QR scan from camera_reader")
+    print(f"    GET  /api/pop_pending — tracker.py polls this")
+    print("-" * 55 + "\n")
+    print(f"🚀 LeBag Central Hub running on http://0.0.0.0:{SERVER_PORT}")
     app.run(host='0.0.0.0', port=SERVER_PORT, debug=False, use_reloader=False)
 
 if __name__ == '__main__':

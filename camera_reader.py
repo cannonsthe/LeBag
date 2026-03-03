@@ -6,10 +6,10 @@ import requests
 from pyzbar.pyzbar import decode, ZBarSymbol
 
 # --- CONFIGURATION ---
-PI_STREAM_URL = "tcp://192.168.2.2:5000"
+PI_STREAM_URL = "tcp://10.47.163.157:5000"
 SERVER_API_URL = "http://127.0.0.1:5001/api/camera_scan"
 MAX_WIDTH = 800
-CONSISTENCY_THRESHOLD = 3 # Frames required to confirm a read
+CONSISTENCY_THRESHOLD = 1 # Frames required to confirm a read
 
 class VideoStreamWidget(object):
     """Background thread to constantly read frames from the VideoCapture, ensuring zero buffer delay."""
@@ -43,19 +43,23 @@ def process_frame(frame, seen_codes, consistency_counter):
         scale = MAX_WIDTH / w
         frame = cv2.resize(frame, (MAX_WIDTH, int(h * scale)))
 
-    # 2. Convert to grayscale (PyZbar only checks luma)
+    # 2. Convert to grayscale
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    # 3. CLAHE Adaptive Thresholding (brings out QR codes hidden in shadows/low light)
+    # 3. CLAHE Adaptive Thresholding
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
     contrast = clahe.apply(gray)
 
-    # 4. Sharpening Kernel (counteracts motion blur from the conveyor belt)
+    # 4. Sharpening Kernel
     kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
     sharp = cv2.filter2D(contrast, -1, kernel)
 
-    # Decode using the optimized, sharp grayscale image
-    decoded_objects = decode(sharp, symbols=[ZBarSymbol.QRCODE, ZBarSymbol.EAN13])
+    # Try decoding on multiple variants — whichever works first wins
+    decoded_objects = (
+        decode(sharp, symbols=[ZBarSymbol.QRCODE, ZBarSymbol.EAN13]) or
+        decode(contrast, symbols=[ZBarSymbol.QRCODE, ZBarSymbol.EAN13]) or
+        decode(gray, symbols=[ZBarSymbol.QRCODE, ZBarSymbol.EAN13])
+    )
     current_frame_codes = set()
 
     for obj in decoded_objects:

@@ -94,8 +94,8 @@ def register_bag():
             print(f"📲 Telegram Chat ID saved: {chat_id}")
         else:
             print(f"ℹ️  No Chat ID — will use name lookup (Marcus/Leonard/Ashok/Balaji/YiBin)")
-        print(f"\n💡 Write '{bag_id}' to the NFC sticker:")
-        print(f"   python3 nfc_writer.py {bag_id}   (run on the Pi)")
+        print(f"\n💡 Next step: Write '{bag_id}' to the NFC tag on the Raspberry Pi.")
+        print(f"   (Use the PN532 write tool on your Pi, or the nfc_writer tool of your choice)")
     else:
         print("❌ Registration cancelled (missing fields).")
 
