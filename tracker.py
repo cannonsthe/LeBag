@@ -16,7 +16,7 @@ SERVER_API_URL = "http://localhost:5001"
 # STREAM 2 — Phone camera (on-belt live tracking)
 # Use the IP Webcam app (Android) or similar. Format: http://<PHONE_IP>:8080/video
 # To find your phone's IP: open IP Webcam app → it shows the URL at the bottom
-ANDROID_STREAM_URL = "http://10.85.165.239:8080/video"  # ← Set to your phone's IP
+ANDROID_STREAM_URL = "http://10.47.163.60:8080/video"  # ← Set to your phone's IP
 
 # --------------------------
 # State Management
