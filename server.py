@@ -1,5 +1,3 @@
-import cv2
-import numpy as np
 import time
 import threading
 import json
@@ -8,22 +6,8 @@ import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from datetime import datetime
-from pyzbar.pyzbar import decode, ZBarSymbol
 
 # --- CONFIGURATION ---
-# ┌─────────────────────────────────────────────────────────────────────┐
-# │  STREAM 1 (Pre-belt, ~2 min out): Raspberry Pi Camera OR NFC scan  │
-# │  Pi camera streams QR detection here. NFC tags bypass this and     │
-# │  POST directly to /api/nfc_scan from nfc_reader.py on the Pi.      │
-# │  Set to the Pi's IP — e.g. "tcp://192.168.1.XXX:5000"             │
-# └─────────────────────────────────────────────────────────────────────┘
-PI_STREAM_URL = "tcp://192.168.2.2:5000"  # ← Pi camera TCP stream (pre-belt)
-
-# ┌─────────────────────────────────────────────────────────────────────┐
-# │  STREAM 2 (On-belt): Phone camera — handled by tracker.py          │
-# │  Set ANDROID_STREAM_URL in tracker.py to your phone's IP Webcam    │
-# │  URL e.g. "http://192.168.1.XXX:8080/video"                        │
-# └─────────────────────────────────────────────────────────────────────┘
 SERVER_PORT = 5001
 NOTIFICATION_SERVER_URL = "http://localhost:3000"  # notification/tele.js
 BAG_DB_FILE = os.path.join(os.path.dirname(__file__), "bag_database.json")
@@ -45,8 +29,12 @@ CORS(app)
 pending_queue = []
 bags = []
 bag_id_counter = 1
-seen_codes = set()
 lock = threading.Lock()
+
+# Robustness Engine State
+recent_scans = {}
+current_scan_candidates = []
+robustness_timer_active = False
 
 # ==========================================
 # BAG DATABASE HELPER
@@ -55,6 +43,8 @@ lock = threading.Lock()
 def load_bag_database():
     """Load bag_database.json; returns {} on error."""
     try:
+        if not os.path.exists(BAG_DB_FILE):
+             return {}
         with open(BAG_DB_FILE, 'r') as f:
             return json.load(f)
     except Exception as e:
@@ -81,25 +71,12 @@ def trigger_notification(bag_id, owner, chat_id):
         print(f"⚠️  Could not reach notification server: {e}")
 
 # ==========================================
-# FLASK API ENDPOINTS
+# ROBUSTNESS ENGINE
 # ==========================================
 
-@app.route('/api/nfc_scan', methods=['POST'])
-def nfc_scan():
-    """
-    Called by nfc_reader.py on the Raspberry Pi when a tag is scanned.
-    body: { "bag_id": "LB001", "uid": "AABBCCDD" }
-    Runs the same pipeline as a QR scan.
-    """
-    data   = request.json
-    bag_id = (data or {}).get('bag_id', '').strip()
-    uid    = (data or {}).get('uid', '')
-
-    if not bag_id:
-        return jsonify({"error": "Missing bag_id"}), 400
-
-    print(f"\n📎 [NFC] Tag scanned — Bag ID: '{bag_id}'  UID: {uid}")
-
+def execute_bag_processing(bag_id, raw_data, source):
+    """Process the winning bag_id after the robustness window closes."""
+    
     bag_db    = load_bag_database()
     bag_entry = bag_db.get(bag_id, {})
 
@@ -121,12 +98,26 @@ def nfc_scan():
             flight   = parts[2].strip()
             if not chat_id:
                 chat_id = NAME_TO_CHAT_ID.get(owner, "")
+                
+    # Fallback: parse colon embedded
+    if owner == "Unknown" and ":" in bag_id:
+        parts = bag_id.split(":")
+        if len(parts) >= 2:
+            owner = parts[1].strip()
+            if not chat_id:
+                chat_id = NAME_TO_CHAT_ID.get(owner, "")
 
-    print(f"📎 [NFC] Resolved → Owner: {owner} | Chat ID: {chat_id or 'N/A'}")
+    print(f"✅ [WINNER] Source: {source} | Bag ID: '{bag_id}' → Owner: {owner} | Chat ID: {chat_id or 'N/A'}")
 
     with lock:
+        # Final safety check for 10s deduplication (just in case another thread snuck in)
+        if bag_id in recent_scans and time.time() - recent_scans[bag_id] < 10:
+            return
+        
+        recent_scans[bag_id] = time.time()
+        
         pending_queue.append(owner)
-        print(f"➕ [NFC] Queued '{owner}' for tracker (Total: {len(pending_queue)})")
+        print(f"➕ Queued '{owner}' for tracker (Total: {len(pending_queue)})")
 
     add_bag(owner, bag_type, flight)
 
@@ -136,7 +127,88 @@ def nfc_scan():
         daemon=True
     ).start()
 
-    return jsonify({"message": "NFC scan processed", "owner": owner, "flight": flight}), 200
+def process_candidates():
+    """Timer callback to choose the best scan from the 1.0s window."""
+    global current_scan_candidates, robustness_timer_active
+    
+    with lock:
+        candidates = current_scan_candidates.copy()
+        current_scan_candidates.clear()
+        robustness_timer_active = False
+        
+    if not candidates:
+        return
+        
+    best_candidate = None
+    best_score = -1
+    bag_db = load_bag_database()
+    
+    for c in candidates:
+        bid = c["bag_id"]
+        score = 0
+        if bid in bag_db: score += 100
+        if "," in bid or ":" in bid: score += 50
+        if bid.isalnum(): score += 10
+        if len(bid) >= 4: score += 5
+        
+        if score > best_score:
+            best_score = score
+            best_candidate = c
+            
+    if best_candidate and best_score > 0:
+        execute_bag_processing(best_candidate["bag_id"], best_candidate["raw_data"], best_candidate["source"])
+    elif best_candidate:
+        print(f"⚠️  [ROBUSTNESS] Dumped garbage scan: '{best_candidate['bag_id']}'")
+
+# ==========================================
+# FLASK API ENDPOINTS
+# ==========================================
+
+@app.route('/api/nfc_scan', methods=['POST'])
+def nfc_scan():
+    global robustness_timer_active
+    data   = request.json
+    bag_id = (data or {}).get('bag_id', '').strip()
+    
+    if not bag_id:
+        return jsonify({"error": "Missing bag_id"}), 400
+        
+    print(f"📎 [NFC] Raw scan received: '{bag_id}'")
+        
+    with lock:
+        if bag_id in recent_scans and time.time() - recent_scans[bag_id] < 10:
+            return jsonify({"message": "Duplicate ignored"}), 200
+            
+        current_scan_candidates.append({"bag_id": bag_id, "source": "nfc", "raw_data": data})
+        
+        if not robustness_timer_active:
+            robustness_timer_active = True
+            threading.Timer(1.0, process_candidates).start()
+            
+    return jsonify({"message": "Scan queued for robustness check"}), 202
+
+@app.route('/api/camera_scan', methods=['POST'])
+def camera_scan():
+    global robustness_timer_active
+    data   = request.json
+    bag_id = (data or {}).get('qr_data', '').strip()
+    
+    if not bag_id:
+        return jsonify({"error": "Missing qr_data"}), 400
+        
+    print(f"📷 [CAM] Raw scan received: '{bag_id}'")
+        
+    with lock:
+        if bag_id in recent_scans and time.time() - recent_scans[bag_id] < 10:
+            return jsonify({"message": "Duplicate ignored"}), 200
+            
+        current_scan_candidates.append({"bag_id": bag_id, "source": "camera", "raw_data": data})
+        
+        if not robustness_timer_active:
+            robustness_timer_active = True
+            threading.Timer(1.0, process_candidates).start()
+            
+    return jsonify({"message": "Scan queued for robustness check"}), 202
 
 @app.route('/enroll', methods=['POST'])
 def enroll_bag_external():
@@ -240,168 +312,12 @@ def add_bag(owner, bag_type, flight):
         print(f"✅ New Bag Added: {new_bag_entry}")
 
 # ==========================================
-# FLASK THREAD
-# ==========================================
-
-def run_server():
-    print(f"🚀 LeBag Server Backend Running on http://localhost:{SERVER_PORT}")
-    app.run(host='0.0.0.0', port=SERVER_PORT, debug=False, use_reloader=False)
-
-# ==========================================
-# QR SCANNER LOOP
-# ==========================================
-
-def run_scanner():
-    global seen_codes
-
-    print(f"📷 Scanner Connecting to {PI_STREAM_URL}...")
-    try:
-        cap = cv2.VideoCapture(PI_STREAM_URL)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        if not cap.isOpened():
-            print("⚠️ Could not open stream. Falling back to webcam (0).")
-            cap = cv2.VideoCapture(0)
-            current_stream_mode = "LOCAL"
-        else:
-            current_stream_mode = "TCP"
-    except Exception as e:
-        print(f"⚠️ Error: {e}. Falling back to webcam (0).")
-        cap = cv2.VideoCapture(0)
-        current_stream_mode = "LOCAL"
-
-    last_reconnect_time = time.time()
-    reconnect_thread = None
-    test_cap_result = []
-    consistency_counter = {}
-    CONSISTENCY_THRESHOLD = 5
-
-    print("📷 Scanner Running... Looking for QR Codes (Press 'q' to quit)")
-
-    while True:
-        try:
-            # Background reconnect to primary stream
-            if current_stream_mode == "LOCAL" and time.time() - last_reconnect_time > 5.0:
-                if reconnect_thread is None or not reconnect_thread.is_alive():
-                    if not test_cap_result:
-                        print(f"🔄 Attempting to reconnect to {PI_STREAM_URL}...")
-                        def _try_reconnect():
-                            temp_cap = cv2.VideoCapture(PI_STREAM_URL)
-                            if temp_cap.isOpened():
-                                test_cap_result.append(temp_cap)
-                            else:
-                                temp_cap.release()
-                        reconnect_thread = threading.Thread(target=_try_reconnect, daemon=True)
-                        reconnect_thread.start()
-                        last_reconnect_time = time.time()
-
-            if test_cap_result:
-                print("✅ Reconnected to primary stream!")
-                cap.release()
-                cap = test_cap_result.pop(0)
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                current_stream_mode = "TCP"
-
-            # Drain buffer for lowest latency
-            for _ in range(4):
-                cap.grab()
-
-            ret, frame = cap.read()
-            if not ret:
-                if current_stream_mode == "TCP":
-                    print("⚠️ Stream lost! Falling back to webcam.")
-                    cap.release()
-                    cap = cv2.VideoCapture(0)
-                    current_stream_mode = "LOCAL"
-                    last_reconnect_time = time.time()
-                else:
-                    time.sleep(0.1)
-                continue
-
-            decoded_objects = decode(frame, symbols=[ZBarSymbol.QRCODE, ZBarSymbol.EAN13])
-            current_frame_codes = set()
-
-            for obj in decoded_objects:
-                data = obj.data.decode('utf-8')
-                code_type = obj.type
-                current_frame_codes.add(data)
-
-                x, y, w, h = obj.rect.left, obj.rect.top, obj.rect.width, obj.rect.height
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
-
-                consistency_counter[data] = consistency_counter.get(data, 0) + 1
-
-                if consistency_counter[data] >= CONSISTENCY_THRESHOLD:
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 3)
-                    cv2.putText(frame, f"{code_type}: {data}", (x, y - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
-                    if data not in seen_codes:
-                        print(f"✅ CONFIRMED NEW {code_type}: {data}")
-                        seen_codes.add(data)
-
-                        # --- Look up bag info from database ---
-                        bag_db    = load_bag_database()
-                        bag_entry = bag_db.get(data, {})
-
-                        owner    = bag_entry.get("owner", "Unknown")
-                        bag_type = bag_entry.get("type", data)
-                        flight   = bag_entry.get("flight", "Unknown")
-                        chat_id  = bag_entry.get("chat_id", "")
-
-                        # Fallback: resolve chat_id by name if not in DB entry
-                        if not chat_id:
-                            chat_id = NAME_TO_CHAT_ID.get(owner, "")
-
-                        # Fallback: parse owner/type/flight embedded in QR value
-                        if owner == "Unknown":
-                            if "," in data:
-                                parts = data.split(",")
-                                if len(parts) >= 3:
-                                    owner    = parts[0].strip()
-                                    bag_type = parts[1].strip()
-                                    flight   = parts[2].strip()
-                            elif ":" in data:
-                                parts = data.split(":")
-                                if len(parts) >= 2:
-                                    owner = parts[1].strip()
-                            # Try name→chat_id again after parsing
-                            if not chat_id:
-                                chat_id = NAME_TO_CHAT_ID.get(owner, "")
-
-                        print(f"📥 Mapped '{data}' → Owner: {owner} | Chat ID: {chat_id or 'N/A'}")
-
-                        with lock:
-                            pending_queue.append(owner)
-                            print(f"➕ Queued '{owner}' for tracker (Total: {len(pending_queue)})")
-
-                        add_bag(owner, bag_type, flight)
-
-                        # --- Fire Telegram + open live website link ---
-                        threading.Thread(
-                            target=trigger_notification,
-                            args=(data, owner, chat_id),
-                            daemon=True
-                        ).start()
-
-            for code in list(consistency_counter.keys()):
-                if code not in current_frame_codes:
-                    consistency_counter[code] = 0
-
-        except Exception as e:
-            print(f"Error in scanner loop: {e}")
-
-        cv2.imshow("LeBag Scanner", frame)
-        if cv2.waitKey(1) == ord('q'):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-# ==========================================
 # ENTRY POINT
 # ==========================================
 
+def run_server():
+    print(f"🚀 LeBag Server Backend (Robustness Enabled) Running on http://0.0.0.0:{SERVER_PORT}")
+    app.run(host='0.0.0.0', port=SERVER_PORT, debug=False, use_reloader=False)
+
 if __name__ == '__main__':
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
-    run_scanner()
+    run_server()
