@@ -3,7 +3,7 @@ import threading
 import json
 import os
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from datetime import datetime
 
@@ -11,6 +11,7 @@ from datetime import datetime
 SERVER_PORT = 5001
 NOTIFICATION_SERVER_URL = "http://localhost:3000"
 BAG_DB_FILE = os.path.join(os.path.dirname(__file__), "bag_database.json")
+DASHBOARD_DIR  = os.path.join(os.path.dirname(__file__), "notification")
 
 # Pi NFC server — PC polls this instead of Pi POSTing to PC
 # Set via LEBAG_PI_IP env var (from start_lebag.bat) or config.env
@@ -165,6 +166,16 @@ def process_candidates():
         execute_bag_processing(best_candidate["bag_id"], best_candidate["raw_data"], best_candidate["source"])
     elif best_candidate:
         print(f"⚠️  [ROBUSTNESS] Dumped garbage scan: '{best_candidate['bag_id']}'")
+
+# ==========================================
+# DASHBOARD (served from port 5001)
+# ==========================================
+
+@app.route('/', methods=['GET'])
+@app.route('/dashboard', methods=['GET'])
+def serve_dashboard():
+    """Serves the operator dashboard HTML at http://localhost:5001/"""
+    return send_from_directory(DASHBOARD_DIR, 'dashboard.html')
 
 # ==========================================
 # FLASK API ENDPOINTS

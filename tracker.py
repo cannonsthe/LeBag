@@ -15,8 +15,9 @@ SERVER_API_URL = "http://localhost:5001"
 
 # STREAM 2 — Phone camera (on-belt live tracking)
 # Use the IP Webcam app (Android) or similar. Format: http://<PHONE_IP>:8080/video
-# To find your phone's IP: open IP Webcam app → it shows the URL at the bottom
-ANDROID_STREAM_URL = "http://10.47.163.60:8080/video"  # ← Set to your phone's IP
+# Reads from LEBAG_ANDROID_URL env var (set by launcher/start_lebag.bat) or falls back to the hardcoded value.
+_default_stream = "http://10.47.163.60:8080/video"
+ANDROID_STREAM_URL = os.environ.get("LEBAG_ANDROID_URL", _default_stream)
 
 # --------------------------
 # State Management
@@ -32,10 +33,21 @@ last_known_positions = {} # track_id -> (x1, y1, x2, y2)
 # --------------------------
 class VideoStream:
     def __init__(self, src):
-        self.stream = cv2.VideoCapture(src)
+        # For HTTP/RTSP streams, use the FFMPEG backend with a minimal buffer so we
+        # always get the LATEST frame rather than a stale buffered one.
+        is_network = isinstance(src, str) and src.startswith('http')
+        if is_network:
+            self.stream = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
+        else:
+            self.stream = cv2.VideoCapture(src)
+
+        # Minimise internal buffer (1 frame) to reduce latency / stuttering
+        self.stream.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
         if not self.stream.isOpened():
-            print(f"⚠️ Could not open stream {src}. Please double check the IP address. Falling back to default camera (0).")
+            print(f"⚠️ Could not open stream {src}. Falling back to default camera (0).")
             self.stream = cv2.VideoCapture(0)
+            self.stream.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             if not self.stream.isOpened():
                 print("Error: Could not open any video source.")
         self.grabbed, self.frame = self.stream.read()
@@ -53,6 +65,8 @@ class VideoStream:
                 self.grabbed = grabbed
                 if grabbed and frame is not None:
                     self.frame = frame
+            # Tiny sleep keeps CPU usage low; at 30fps we have ~33ms per frame
+            time.sleep(0.005)
 
     def read(self):
         with self.lock:
@@ -125,10 +139,10 @@ def main():
     import torch
 
     # --- Model Loading ---
-    MODEL_FILE = "best.pt"
+    MODEL_FILE = "baggage.pt"
     if not os.path.exists(MODEL_FILE):
         print(f"⚠️  '{MODEL_FILE}' not found. Falling back to pretrained 'yolov8n.pt'.")
-        print(f"   (For best results, place your custom trained best.pt in the project folder)")
+        print(f"   (Place baggage.pt in the project root folder for custom luggage detection)")
         MODEL_FILE = "yolov8n.pt"
     print(f"\n🤖 Loading model: {MODEL_FILE}...")
 
@@ -175,11 +189,13 @@ def main():
         cv2.line(annotated_frame, (0, collection_line_y), (width, collection_line_y), (0, 255, 0), 2)
         cv2.putText(annotated_frame, "COLLECTION ZONE", (50, collection_line_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-        results = model.track(frame, 
-                              persist=True, 
-                              classes=[0], # Class 0 is custom 'Luggage' in best.pt
-                              conf=0.25,
-                              tracker="bytetrack.yaml", 
+        results = model.track(frame,
+                              persist=True,
+                              # No 'classes' filter — baggage.pt is trained only on
+                              # luggage classes, so all detections are relevant.
+                              conf=0.20,
+                              iou=0.45,
+                              tracker="bytetrack.yaml",
                               verbose=False)
         
         
@@ -245,7 +261,9 @@ def main():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                             
             # Check for vanished bags to trigger collection
-            vanished_threshold_frames = 30 # E.g., not seen for 1 second at 30fps
+            # 90 frames ≈ 3 seconds — gives time to recover tracking through brief
+            # stutters or lighting changes without falsely triggering collection.
+            vanished_threshold_frames = 90
             for tid in list(active_assignments.keys()):
                 if tid not in current_frame_ids and (frame_count - last_seen_frames.get(tid, 0)) > vanished_threshold_frames:
                     

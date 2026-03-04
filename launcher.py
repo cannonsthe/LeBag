@@ -24,10 +24,13 @@ YELLOW = "\033[93m"
 CYAN   = "\033[96m"
 GREY   = "\033[90m"
 
+MAGENTA = "\033[95m"
+
 LABELS = {
-    "tele":   (GREEN,  "  NOTIFY "),
-    "server": (YELLOW, "  SERVER "),
-    "camera": (CYAN,   "  CAMERA "),
+    "tele":    (GREEN,   "  NOTIFY  "),
+    "server":  (YELLOW,  "  SERVER  "),
+    "camera":  (CYAN,    "  CAMERA  "),
+    "tracker": (MAGENTA, "  TRACKER "),
 }
 
 processes = []
@@ -123,6 +126,10 @@ if __name__ == "__main__":
 
     # 3 — Camera reader (-u = unbuffered; cv2.imshow() still opens its own GUI window)
     start_service("camera", [VENV_PYTHON, "-u", "camera_reader.py"], extra_env=extra_env)
+    time.sleep(1)
+
+    # 4 — YOLO tracker (baggage.pt) — LEBAG_ANDROID_URL comes from the start_lebag.bat prompt
+    start_service("tracker", [VENV_PYTHON, "-u", "tracker.py"], extra_env=extra_env)
 
     print(f"\n{BOLD}[LAUNCHER]{RESET} All services running. Press Ctrl+C to stop everything.\n")
 

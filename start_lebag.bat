@@ -53,15 +53,27 @@ echo.
 
 :pi_ip_ready
 :: -----------------------------------------------
+:: Prompt for Android phone stream URL
+:: -----------------------------------------------
+if "%ANDROID_URL%"=="" (
+    echo   Android Phone Stream ^(IP Webcam app^)
+    echo   Leave blank to skip and use default: http://10.47.163.60:8080/video
+    set /p "ANDROID_URL=  Enter phone stream URL (or press Enter to skip^): "
+)
+if "%ANDROID_URL%"=="" set "ANDROID_URL=http://10.47.163.60:8080/video"
+
+:: -----------------------------------------------
 :: Set env vars for launcher.py to inherit
 :: -----------------------------------------------
 set "LEBAG_PI_IP=%PI_IP%"
 set "LEBAG_PI_STREAM_URL=tcp://%PI_IP%:5000"
+set "LEBAG_ANDROID_URL=%ANDROID_URL%"
 
 echo ================================================
-echo   Pi IP     : %PI_IP%
-echo   NFC poll  : http://%PI_IP%:5002/api/nfc_scan
-echo   Stream    : tcp://%PI_IP%:5000
+echo   Pi IP        : %PI_IP%
+echo   NFC poll     : http://%PI_IP%:5002/api/nfc_scan
+echo   Pi Stream    : tcp://%PI_IP%:5000
+echo   Phone Stream : %ANDROID_URL%
 echo ================================================
 echo.
 echo   Starting all services in this window...
