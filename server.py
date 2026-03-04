@@ -198,11 +198,11 @@ def nfc_scan():
             return jsonify({"message": "Duplicate ignored"}), 200
             
         current_scan_candidates.append({"bag_id": bag_id, "source": "nfc", "raw_data": data})
-        print(f"  └─ ⏳ [NFC] Queued. Waiting 1.0s for other sensors...") 
+        print(f"  └─ ⏳ [NFC] Queued. Waiting 0.3s for other sensors...")
         
         if not robustness_timer_active:
             robustness_timer_active = True
-            threading.Timer(1.0, process_candidates).start()
+            threading.Timer(0.3, process_candidates).start()
             
     return jsonify({"message": "Scan queued for robustness check"}), 202
 
@@ -223,11 +223,11 @@ def camera_scan():
             return jsonify({"message": "Duplicate ignored"}), 200
             
         current_scan_candidates.append({"bag_id": bag_id, "source": "camera", "raw_data": data})
-        print(f"  └─ ⏳ [CAM] Queued. Waiting 1.0s for other sensors...")
+        print(f"  └─ ⏳ [CAM] Queued. Waiting 0.3s for other sensors...")
         
         if not robustness_timer_active:
             robustness_timer_active = True
-            threading.Timer(1.0, process_candidates).start()
+            threading.Timer(0.3, process_candidates).start()
             
     return jsonify({"message": "Scan queued for robustness check"}), 202
 
@@ -268,15 +268,15 @@ def poll_pi_nfc():
                         current_scan_candidates.append({
                             "bag_id": bag_id, "source": "nfc", "raw_data": scan
                         })
-                        print(f"  └─ ⏳ [NFC] Queued. Waiting 1.0s for other sensors...")
+                        print(f"  └─ ⏳ [NFC] Queued. Waiting 0.3s for other sensors...")
                         if not robustness_timer_active:
                             robustness_timer_active = True
-                            threading.Timer(1.0, process_candidates).start()
+                            threading.Timer(0.3, process_candidates).start()
         except requests.exceptions.ConnectionError:
             pass  # Pi not up yet — keep retrying silently
         except Exception as e:
             print(f"⚠️  [NFC Poller] Error: {e}")
-        time.sleep(0.5)
+        time.sleep(0.1)  # Poll every 100ms (was 500ms) — reduces NFC detection lag
 
 @app.route('/api/pop_pending', methods=['GET'])
 def pop_pending():
